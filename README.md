@@ -9,8 +9,10 @@ This OpenResty plugin automatically and transparently issues SSL certificates fr
 - A SSL request for a SNI hostname is received.
 - If the system already has a SSL certificate for that domain, it is immediately returned (with OCSP stapling).
 - If the system does not yet have an SSL certificate for this domain, it issues a new SSL certificate from Let's Encrypt. Domain validation is handled for you. After receiving the new certificate (usually within a few seconds), the new certificate is saved, cached, and returned to the client (without dropping the original request).
-- ### My improvement
-If the system has a large number of domains(such as 10000 or more), it is easy to have CPU crash, because renewing a large number of certifates instantaneous will cause a lot of rsa (or ecc) computation which is CPU-intensive. So wen can renew a small set of domains each time.
+- #### My improvement
+  If the system has a large number of domains(such as 10000 or more), it is easy to have CPU crash, because renewing a large number of 
+  certifates instantaneous will cause a lot of rsa (or ecc) computation which is CPU-intensive. So wen can renew a small set of domains 
+  each time.
 
 This uses the `ssl_certificate_by_lua` functionality in OpenResty 1.9.7.2+.
 

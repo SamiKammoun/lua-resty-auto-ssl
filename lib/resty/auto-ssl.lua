@@ -57,6 +57,10 @@ function _M.new(options)
     options["hook_server_port"] = 8999
   end
 
+  if not options["renew_cnt_eachtime"] then
+    options["renew_cnt_eachtime"] = 20 -- number of domains each checking time
+  end
+
   return setmetatable({ options = options }, { __index = _M })
 end
 

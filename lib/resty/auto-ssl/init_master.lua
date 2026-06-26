@@ -106,6 +106,10 @@ local function setup_storage(auto_ssl_instance)
   local storage_instance = storage.new({
     adapter = storage_adapter_instance,
     json_adapter = json_adapter_instance,
+    cert_queue_key = auto_ssl_instance:get("cert_queue_key"),
+    cert_backoff_prefix = auto_ssl_instance:get("cert_backoff_prefix"),
+    use_domain_index = auto_ssl_instance:get("use_domain_index"),
+    domain_index_key = auto_ssl_instance:get("domain_index_key"),
   })
   auto_ssl_instance.storage = storage_instance
 end

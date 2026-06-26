@@ -57,14 +57,39 @@ function _M.set_cert(self, domain, fullchain_pem, privkey_pem, cert_pem, expiry)
   end
 
   -- Store the cert under the "latest" alias, which is what this app will use.
-  return self.adapter:set(domain .. ":latest", string)
+  local ok, set_err = self.adapter:set(domain .. ":latest", string)
+  if ok and self.use_domain_index and self.domain_index_key and self.adapter.sadd then
+    local _, index_err = self.adapter:sadd(self.domain_index_key, domain)
+    if index_err then
+      ngx.log(ngx.ERR, "auto-ssl: failed to add domain to index for ", domain, ": ", index_err)
+    end
+  end
+
+  return ok, set_err
 end
 
 function _M.delete_cert(self, domain)
+  if self.use_domain_index and self.domain_index_key and self.adapter.srem then
+    local _, index_err = self.adapter:srem(self.domain_index_key, domain)
+    if index_err then
+      ngx.log(ngx.ERR, "auto-ssl: failed to remove domain from index for ", domain, ": ", index_err)
+    end
+  end
+
   return self.adapter:delete(domain .. ":latest")
 end
 
 function _M.all_cert_domains(self)
+  -- Prefer the maintained index set so we don't scan the keyspace on every
+  -- renewal cycle (KEYS *:latest blocks redis on large keyspaces).
+  if self.use_domain_index and self.domain_index_key and self.adapter.smembers then
+    local domains, err = self.adapter:smembers(self.domain_index_key)
+    if err then
+      return nil, err
+    end
+    return domains
+  end
+
   local keys, err = self.adapter:keys_with_suffix(":latest")
   if err then
     return nil, err
@@ -77,6 +102,94 @@ function _M.all_cert_domains(self)
   end
 
   return domains
+end
+
+-- Build the domain index from existing certificates using a cursor-based SCAN
+-- (never KEYS). Intended to run once when the index is first introduced.
+function _M.build_domain_index(self)
+  if not (self.domain_index_key and self.adapter.sadd) then
+    return nil, "domain index not configured"
+  end
+
+  local keys, err
+  if self.adapter.scan_with_suffix then
+    keys, err = self.adapter:scan_with_suffix(":latest")
+  else
+    keys, err = self.adapter:keys_with_suffix(":latest")
+  end
+  if err then
+    return nil, err
+  end
+
+  local count = 0
+  for _, key in ipairs(keys) do
+    local domain = ngx.re.sub(key, ":latest$", "", "jo")
+    local _, sadd_err = self.adapter:sadd(self.domain_index_key, domain)
+    if sadd_err then
+      ngx.log(ngx.ERR, "auto-ssl: failed to backfill index for ", domain, ": ", sadd_err)
+    else
+      count = count + 1
+    end
+  end
+
+  return count
+end
+
+-- Domains pending certificate generation -------------------------------------
+
+function _M.add_pending_domain(self, domain)
+  if not self.adapter.sadd then
+    return nil, "storage adapter does not support sets"
+  end
+  return self.adapter:sadd(self.cert_queue_key, domain)
+end
+
+function _M.get_pending_domains(self)
+  if not self.adapter.smembers then
+    return {}, nil
+  end
+  return self.adapter:smembers(self.cert_queue_key)
+end
+
+function _M.remove_pending_domain(self, domain)
+  if not self.adapter.srem then
+    return nil, "storage adapter does not support sets"
+  end
+  return self.adapter:srem(self.cert_queue_key, domain)
+end
+
+-- Per-domain issuance backoff ------------------------------------------------
+
+function _M.get_backoff(self, domain)
+  local json, err = self.adapter:get(self.cert_backoff_prefix .. domain)
+  if err then
+    return nil, err
+  elseif not json then
+    return nil
+  end
+
+  local data, json_err = self.json_adapter:decode(json)
+  if json_err then
+    return nil, json_err
+  end
+
+  return data
+end
+
+function _M.set_backoff(self, domain, fails, next_attempt, exptime)
+  local json, err = self.json_adapter:encode({
+    fails = tonumber(fails),
+    next_attempt = tonumber(next_attempt),
+  })
+  if err then
+    return nil, err
+  end
+
+  return self.adapter:set(self.cert_backoff_prefix .. domain, json, { exptime = exptime })
+end
+
+function _M.delete_backoff(self, domain)
+  return self.adapter:delete(self.cert_backoff_prefix .. domain)
 end
 
 -- A simplistic locking mechanism to try and ensure the app doesn't try to

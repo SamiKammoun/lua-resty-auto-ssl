@@ -61,6 +61,74 @@ function _M.new(options)
     options["renew_cnt_eachtime"] = 20 -- number of domains each checking time
   end
 
+  -- Whether the renewal background job is spawned in init_worker. Set to false
+  -- on instances that should only serve certificates (not renew them), so a
+  -- single dedicated instance can own renewals.
+  if options["renewals_enabled"] == nil then
+    options["renewals_enabled"] = true
+  end
+
+  -- When true, a handshake for an allowed domain with no certificate (and with
+  -- generate_certs disabled) records the domain in a redis set instead of
+  -- issuing inline. A separate instance running the queue consumer issues it.
+  if options["queue_missing_certs"] == nil then
+    options["queue_missing_certs"] = false
+  end
+
+  -- Redis set holding domains that need a certificate generated.
+  if not options["cert_queue_key"] then
+    options["cert_queue_key"] = "auto_ssl:pending_domains"
+  end
+
+  -- shared dict used to throttle repeat enqueues of the same domain per worker
+  -- process, so the hot handshake path doesn't hammer redis. If the dict does
+  -- not exist, throttling is skipped (every miss enqueues).
+  if not options["queue_throttle_dict"] then
+    options["queue_throttle_dict"] = "cert_queue_throttle"
+  end
+  if not options["queue_throttle_seconds"] then
+    options["queue_throttle_seconds"] = 300
+  end
+
+  -- Whether this instance runs the background job that drains the cert queue
+  -- and issues certificates. Should be enabled on exactly one instance.
+  if options["queue_consumer_enabled"] == nil then
+    options["queue_consumer_enabled"] = false
+  end
+  if not options["queue_consumer_interval"] then
+    options["queue_consumer_interval"] = 60
+  end
+
+  -- Maximum number of certificates successfully issued per queue consumer
+  -- cycle, to keep cycles bounded and stay within ACME rate limits.
+  if not options["queue_issue_max"] then
+    options["queue_issue_max"] = 25
+  end
+
+  -- Key prefix for per-domain issuance backoff state (stored in the storage
+  -- adapter so it survives restarts and is shared across instances).
+  if not options["cert_backoff_prefix"] then
+    options["cert_backoff_prefix"] = "auto_ssl:cert_backoff:"
+  end
+
+  -- Backoff schedule (seconds) applied after consecutive issuance failures for
+  -- a domain. The last value is the cap.
+  if not options["cert_backoff_schedule"] then
+    options["cert_backoff_schedule"] = { 60, 300, 1800, 7200, 21600 }
+  end
+
+  -- When true, renewal discovery reads the domain index set instead of scanning
+  -- the keyspace (KEYS *:latest), which is dangerous on large/shared redis.
+  if options["use_domain_index"] == nil then
+    options["use_domain_index"] = false
+  end
+
+  -- Redis set holding every domain that has a stored certificate. Maintained by
+  -- set_cert when use_domain_index is on, and used for renewal discovery.
+  if not options["domain_index_key"] then
+    options["domain_index_key"] = "auto_ssl:cert_domains"
+  end
+
   return setmetatable({ options = options }, { __index = _M })
 end
 

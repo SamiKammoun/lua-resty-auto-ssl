@@ -101,6 +101,33 @@ local function issue_cert(auto_ssl_instance, storage, domain)
   return cert, err
 end
 
+-- Record a domain that needs a certificate so a separate instance running the
+-- queue consumer can issue it. This runs on the hot handshake path, so repeat
+-- enqueues of the same domain are throttled per worker via a shared dict.
+local function enqueue_missing_cert(auto_ssl_instance, domain)
+  local throttle_dict_name = auto_ssl_instance:get("queue_throttle_dict")
+  local throttle = throttle_dict_name and ngx.shared[throttle_dict_name]
+  if throttle then
+    if throttle:get(domain) then
+      return
+    end
+    -- Set the throttle marker first so concurrent handshakes don't all enqueue.
+    throttle:set(domain, true, auto_ssl_instance:get("queue_throttle_seconds"))
+  end
+
+  local storage = auto_ssl_instance.storage
+  local _, err = storage:add_pending_domain(domain)
+  if err then
+    ngx.log(ngx.ERR, "auto-ssl: failed to enqueue domain needing certificate ", domain, ": ", err)
+    -- Clear the throttle marker so the next handshake retries the enqueue.
+    if throttle then
+      throttle:delete(domain)
+    end
+  else
+    ngx.log(ngx.NOTICE, "auto-ssl: enqueued domain for certificate generation: ", domain)
+  end
+end
+
 local function get_cert_der(auto_ssl_instance, domain, ssl_options)
   -- Look for the certificate in shared memory first.
   local fullchain_der = ngx.shared.auto_ssl:get("domain:fullchain_der:" .. domain)
@@ -149,6 +176,11 @@ local function get_cert_der(auto_ssl_instance, domain, ssl_options)
       return cert_der
     end
   else
+    -- We won't issue inline. If configured, record the domain so a dedicated
+    -- generator instance can issue it out of band.
+    if auto_ssl_instance:get("queue_missing_certs") then
+      enqueue_missing_cert(auto_ssl_instance, domain)
+    end
     return nil, "did not issue certificate, because the generate_certs setting is false"
   end
 

@@ -107,6 +107,77 @@ function _M.delete(self, key)
   return connection:del(prefixed_key(self, key))
 end
 
+function _M.sadd(self, key, member)
+  local connection, connection_err = self:get_connection()
+  if connection_err then
+    return false, connection_err
+  end
+
+  return connection:sadd(prefixed_key(self, key), member)
+end
+
+function _M.srem(self, key, member)
+  local connection, connection_err = self:get_connection()
+  if connection_err then
+    return false, connection_err
+  end
+
+  return connection:srem(prefixed_key(self, key), member)
+end
+
+function _M.smembers(self, key)
+  local connection, connection_err = self:get_connection()
+  if connection_err then
+    return false, connection_err
+  end
+
+  local members, err = connection:smembers(prefixed_key(self, key))
+  if members == ngx.null then
+    members = {}
+  end
+
+  return members, err
+end
+
+-- Cursor-based (SCAN) variant of keys_with_suffix. Unlike KEYS, this does not
+-- block redis on large keyspaces. Intended for one-off operations like building
+-- the domain index, not the hot path.
+function _M.scan_with_suffix(self, suffix)
+  local connection, connection_err = self:get_connection()
+  if connection_err then
+    return false, connection_err
+  end
+
+  local match = prefixed_key(self, "*" .. suffix)
+  local cursor = "0"
+  local found = {}
+  repeat
+    local res, err = connection:scan(cursor, "MATCH", match, "COUNT", 1000)
+    if err then
+      return false, err
+    end
+
+    cursor = res[1]
+    local batch = res[2]
+    if batch then
+      for _, key in ipairs(batch) do
+        table.insert(found, key)
+      end
+    end
+  until cursor == "0"
+
+  if self.options["prefix"] then
+    local offset = string.len(self.options["prefix"]) + 2
+    local unprefixed_keys = {}
+    for _, key in ipairs(found) do
+      table.insert(unprefixed_keys, string.sub(key, offset))
+    end
+    found = unprefixed_keys
+  end
+
+  return found
+end
+
 function _M.keys_with_suffix(self, suffix)
   local connection, connection_err = self:get_connection()
   if connection_err then
